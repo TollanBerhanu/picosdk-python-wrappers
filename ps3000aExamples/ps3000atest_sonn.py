@@ -1,14 +1,10 @@
 #
-# Copyright (C) 2018-2020 Pico Technology Ltd. See LICENSE file for terms.
-#
-# PS3000 Series (A API) STREAMING MODE EXAMPLE
-# This example demonstrates how to call the ps3000a driver API functions in order to open a device, setup 2 channels and collects streamed data (1 buffer).
-# This data is then plotted as mV against time in ns.
+# PS3000A Streaming with CSV Export
+# This example captures streaming data and saves it to CSV files whenever the buffer is full
 
 import ctypes
 import numpy as np
 from picosdk.ps3000a import ps3000a as ps
-import matplotlib.pyplot as plt
 from picosdk.functions import adc2mV, assert_pico_ok
 import time
 import csv
@@ -19,37 +15,28 @@ from datetime import datetime
 chandle = ctypes.c_int16()
 status = {}
 
-# Open PicoScope 5000 Series device
+# Open PicoScope device
 status["openunit"] = ps.ps3000aOpenUnit(ctypes.byref(chandle), None)
 
 try:
     assert_pico_ok(status["openunit"])
-except: # PicoNotOkError:
-
+except:
     powerStatus = status["openunit"]
-
     if powerStatus == 286:
         status["changePowerSource"] = ps.ps3000aChangePowerSource(chandle, powerStatus)
     elif powerStatus == 282:
         status["changePowerSource"] = ps.ps3000aChangePowerSource(chandle, powerStatus)
     else:
         raise
-
     assert_pico_ok(status["changePowerSource"])
 
-
+# Channel settings
 enabled = 1
 disabled = 0
 analogue_offset = 0.0
+channel_range = ps.PS3000A_RANGE['PS3000A_2V']
 
 # Set up channel A
-# handle = chandle
-# channel = PS3000A_CHANNEL_A = 0
-# enabled = 1
-# coupling type = PS3000A_DC = 1
-# range = PS3000A_2V = 7
-# analogue offset = 0 V
-channel_range = ps.PS3000A_RANGE['PS3000A_2V']
 status["setChA"] = ps.ps3000aSetChannel(chandle,
                                         ps.PS3000A_CHANNEL['PS3000A_CHANNEL_A'],
                                         enabled,
@@ -59,12 +46,6 @@ status["setChA"] = ps.ps3000aSetChannel(chandle,
 assert_pico_ok(status["setChA"])
 
 # Set up channel B
-# handle = chandle
-# channel = PS3000A_CHANNEL_B = 1
-# enabled = 1
-# coupling type = PS3000A_DC = 1
-# range = PS3000A_2V = 7
-# analogue offset = 0 V
 status["setChB"] = ps.ps3000aSetChannel(chandle,
                                         ps.PS3000A_CHANNEL['PS3000A_CHANNEL_B'],
                                         enabled,
@@ -73,26 +54,17 @@ status["setChB"] = ps.ps3000aSetChannel(chandle,
                                         analogue_offset)
 assert_pico_ok(status["setChB"])
 
-# Size of capture
-sizeOfOneBuffer = 500
-numBuffersToCapture = 10
-
+# Buffer configuration
+sizeOfOneBuffer = 1000  # Size of each buffer
+numBuffersToCapture = 5  # Number of buffers before stopping
 totalSamples = sizeOfOneBuffer * numBuffersToCapture
 
-# Create buffers ready for assigning pointers for data collection
+# Create buffers
 bufferAMax = np.zeros(shape=sizeOfOneBuffer, dtype=np.int16)
 bufferBMax = np.zeros(shape=sizeOfOneBuffer, dtype=np.int16)
-
 memory_segment = 0
 
-# Set data buffer location for data collection from channel A
-# handle = chandle
-# source = PS3000A_CHANNEL_A = 0
-# pointer to buffer max = ctypes.byref(bufferAMax)
-# pointer to buffer min = ctypes.byref(bufferAMin)
-# buffer length = maxSamples
-# segment index = 0
-# ratio mode = PS3000A_RATIO_MODE_NONE = 0
+# Set data buffers
 status["setDataBuffersA"] = ps.ps3000aSetDataBuffers(chandle,
                                                      ps.PS3000A_CHANNEL['PS3000A_CHANNEL_A'],
                                                      bufferAMax.ctypes.data_as(ctypes.POINTER(ctypes.c_int16)),
@@ -102,14 +74,6 @@ status["setDataBuffersA"] = ps.ps3000aSetDataBuffers(chandle,
                                                      ps.PS3000A_RATIO_MODE['PS3000A_RATIO_MODE_NONE'])
 assert_pico_ok(status["setDataBuffersA"])
 
-# Set data buffer location for data collection from channel B
-# handle = chandle
-# source = PS3000A_CHANNEL_B = 1
-# pointer to buffer max = ctypes.byref(bufferBMax)
-# pointer to buffer min = ctypes.byref(bufferBMin)
-# buffer length = maxSamples
-# segment index = 0
-# ratio mode = PS3000A_RATIO_MODE_NONE = 0
 status["setDataBuffersB"] = ps.ps3000aSetDataBuffers(chandle,
                                                      ps.PS3000A_CHANNEL['PS3000A_CHANNEL_B'],
                                                      bufferBMax.ctypes.data_as(ctypes.POINTER(ctypes.c_int16)),
@@ -119,14 +83,49 @@ status["setDataBuffersB"] = ps.ps3000aSetDataBuffers(chandle,
                                                      ps.PS3000A_RATIO_MODE['PS3000A_RATIO_MODE_NONE'])
 assert_pico_ok(status["setDataBuffersB"])
 
-# Begin streaming mode:
-sampleInterval = ctypes.c_int32(250)
+# Get maximum ADC value for conversion
+maxADC = ctypes.c_int16()
+status["maximumValue"] = ps.ps3000aMaximumValue(chandle, ctypes.byref(maxADC))
+assert_pico_ok(status["maximumValue"])
+
+# CSV export setup
+csv_directory = r"c:\Users\tberhanu\Desktop\workspace\picosdk-python-wrappers\captured_data"
+os.makedirs(csv_directory, exist_ok=True)
+file_counter = 0
+
+def save_buffer_to_csv(buffer_a, buffer_b, sample_interval_ns, buffer_num):
+    """Save buffer data to CSV file"""
+    global file_counter
+    
+    # Convert ADC counts to mV
+    adc2mVChA = adc2mV(buffer_a, channel_range, maxADC)
+    adc2mVChB = adc2mV(buffer_b, channel_range, maxADC)
+    
+    # Create time array
+    time_ns = np.arange(len(buffer_a)) * sample_interval_ns
+    
+    # Create filename with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"capture_{timestamp}_buffer_{file_counter:03d}.csv"
+    filepath = os.path.join(csv_directory, filename)
+    
+    # Write to CSV
+    with open(filepath, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(['Time_ns', 'Channel_A_mV', 'Channel_B_mV'])
+        for i in range(len(buffer_a)):
+            writer.writerow([time_ns[i], adc2mVChA[i], adc2mVChB[i]])
+    
+    print(f"Buffer {buffer_num} saved to: {filename}")
+    file_counter += 1
+
+# Streaming setup
+sampleInterval = ctypes.c_int32(250)  # 250 μs
 sampleUnits = ps.PS3000A_TIME_UNITS['PS3000A_US']
-# We are not triggering:
 maxPreTriggerSamples = 0
 autoStopOn = 1
-# No downsampling:
 downsampleRatio = 1
+
 status["runStreaming"] = ps.ps3000aRunStreaming(chandle,
                                                 ctypes.byref(sampleInterval),
                                                 sampleUnits,
@@ -141,80 +140,68 @@ assert_pico_ok(status["runStreaming"])
 actualSampleInterval = sampleInterval.value
 actualSampleIntervalNs = actualSampleInterval * 1000
 
-print("Capturing at sample interval %s ns" % actualSampleIntervalNs)
+print(f"Capturing at sample interval {actualSampleIntervalNs} ns")
+print(f"Buffer size: {sizeOfOneBuffer} samples")
+print(f"Will capture {numBuffersToCapture} buffers")
+print(f"CSV files will be saved to: {csv_directory}")
 
-# We need a big buffer, not registered with the driver, to keep our complete capture in.
-bufferCompleteA = np.zeros(shape=totalSamples, dtype=np.int16)
-bufferCompleteB = np.zeros(shape=totalSamples, dtype=np.int16)
+# Global variables for callback
 nextSample = 0
 autoStopOuter = False
 wasCalledBack = False
-
+buffers_captured = 0
 
 def streaming_callback(handle, noOfSamples, startIndex, overflow, triggerAt, triggered, autoStop, param):
-    global nextSample, autoStopOuter, wasCalledBack
+    global nextSample, autoStopOuter, wasCalledBack, buffers_captured
     wasCalledBack = True
-    destEnd = nextSample + noOfSamples
-    sourceEnd = startIndex + noOfSamples
-    bufferCompleteA[nextSample:destEnd] = bufferAMax[startIndex:sourceEnd]
-    bufferCompleteB[nextSample:destEnd] = bufferBMax[startIndex:sourceEnd]
     
-    # Save buffer data to CSV when buffer is full
-    if noOfSamples == sizeOfOneBuffer:
-        buffer_a_copy = bufferAMax[startIndex:sourceEnd].copy()
-        buffer_b_copy = bufferBMax[startIndex:sourceEnd].copy()
-        save_buffer_to_csv(buffer_a_copy, buffer_b_copy, actualSampleIntervalNs)
+    print(f"Callback triggered: noOfSamples={noOfSamples}, startIndex={startIndex}")
+    
+    # Save data regardless of buffer size (remove the exact size check)
+    if noOfSamples > 0:
+        # Copy current buffer data
+        buffer_a_copy = bufferAMax[startIndex:startIndex + noOfSamples].copy()
+        buffer_b_copy = bufferBMax[startIndex:startIndex + noOfSamples].copy()
+        
+        # Save to CSV
+        save_buffer_to_csv(buffer_a_copy, buffer_b_copy, actualSampleIntervalNs, buffers_captured)
+        buffers_captured += 1
     
     nextSample += noOfSamples
     if autoStop:
         autoStopOuter = True
 
-
-# Convert the python function into a C function pointer.
+# Convert callback to C function pointer
 cFuncPtr = ps.StreamingReadyType(streaming_callback)
 
-# Fetch data from the driver in a loop, copying it out of the registered buffers and into our complete one.
-while nextSample < totalSamples and not autoStopOuter:
+# Main data collection loop
+print("Starting data collection...")
+max_iterations = 1000  # Prevent infinite loop
+iteration_count = 0
+
+while nextSample < totalSamples and not autoStopOuter and iteration_count < max_iterations:
     wasCalledBack = False
     status["getStreamingLastestValues"] = ps.ps3000aGetStreamingLatestValues(chandle, cFuncPtr, None)
+    
     if not wasCalledBack:
-        # If we weren't called back by the driver, this means no data is ready. Sleep for a short while before trying
-        # again.
         time.sleep(0.01)
+    
+    iteration_count += 1
+    
+    # Print progress every 100 iterations
+    if iteration_count % 100 == 0:
+        print(f"Iteration {iteration_count}, nextSample: {nextSample}")
 
-print("Done grabbing values.")
-print(f"CSV files saved in: {csv_directory}")
+print(f"Data collection complete. Captured {buffers_captured} buffers.")
+print(f"Total iterations: {iteration_count}")
+print(f"Final nextSample: {nextSample}")
 
-# Find maximum ADC count value
-# handle = chandle
-# pointer to value = ctypes.byref(maxADC)
-maxADC = ctypes.c_int16()
-status["maximumValue"] = ps.ps3000aMaximumValue(chandle, ctypes.byref(maxADC))
-assert_pico_ok(status["maximumValue"])
-
-# Convert ADC counts data to mV
-adc2mVChAMax = adc2mV(bufferCompleteA, channel_range, maxADC)
-adc2mVChBMax = adc2mV(bufferCompleteB, channel_range, maxADC)
-
-# Create time data
-time = np.linspace(0, (totalSamples - 1) * actualSampleIntervalNs, totalSamples)
-
-# Plot data from channel A and B
-plt.plot(time, adc2mVChAMax[:])
-plt.plot(time, adc2mVChBMax[:])
-plt.xlabel('Time (ns)')
-plt.ylabel('Voltage (mV)')
-plt.show()
-
-# Stop the scope
-# handle = chandle
+# Stop and close
 status["stop"] = ps.ps3000aStop(chandle)
 assert_pico_ok(status["stop"])
 
-# Disconnect the scope
-# handle = chandle
 status["close"] = ps.ps3000aCloseUnit(chandle)
 assert_pico_ok(status["close"])
 
-# Display status returns
-print(status)
+print("Device closed successfully.")
+print(f"All CSV files saved in: {csv_directory}")
