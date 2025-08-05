@@ -21,3 +21,6 @@ build/
 dist/
 *.egg-info/
 *.egg
+
+captures/
+.sdkwarning
