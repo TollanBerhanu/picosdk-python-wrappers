@@ -8,13 +8,13 @@ from picosdk.functions import adc2mV, assert_pico_ok
 
 # === CONFIGURATION ===
 NUM_SEGMENTS       = 32          # Number of trigger captures (segments)
-SAMPLES_PER_SEGMENT = 1000       # Samples per segment (adjustable)
-TIMEBASE            = 8          # 100 µs/div (~1 ms total)
-RANGE_A             = ps.PS3000A_RANGE['PS3000A_1V']   # ±1 V
-RANGE_B             = ps.PS3000A_RANGE['PS3000A_10V']  # ±10 V (trigger)
+SAMPLES_PER_SEGMENT = 10000      # Increased to ensure we capture full 1ms
+TIMEBASE            = 8          # 100 µs/div (~1 ms total)
+RANGE_A             = ps.PS3000A_RANGE['PS3000A_1V']   # ±1 V
+RANGE_B             = ps.PS3000A_RANGE['PS3000A_10V']  # ±10 V (trigger)
 THRESHOLD_V         = 4.5        # Trigger level (volts)
 AUTO_TRIGGER_MS     = 1000       # Auto‑trigger timeout (ms)
-CSV_DIR             = 'captures'
+CSV_DIR             = 'captures/try_2'
 posix = False         # Set True on Linux/macOS
 
 os.makedirs(CSV_DIR, exist_ok=True)
@@ -58,7 +58,10 @@ def setup_channels(chandle):
     # Convert THRESHOLD_V to ADC counts
     maxADC = ctypes.c_int16()
     assert_pico_ok(ps.ps3000aMaximumValue(chandle, ctypes.byref(maxADC)))
-    thr_count = int(THRESHOLD_V * maxADC.value / (RANGE_B * 1000.0))
+    
+    # Corrected calculation for trigger threshold
+    max_voltage_range = 10  # ±10V = 20V range
+    thr_count = int(THRESHOLD_V * maxADC.value / max_voltage_range)
 
     # Simple rising‑edge trigger on B
     assert_pico_ok(ps.ps3000aSetSimpleTrigger(
@@ -126,6 +129,26 @@ def capture_and_save():
     seg_max = setup_segments(chandle)
     n_samples = min(seg_max, SAMPLES_PER_SEGMENT)
 
+    # Get timebase info for actual timing calculations
+    timeIntervalNs = ctypes.c_float()
+    returnedMaxSamples = ctypes.c_int16()
+    status = ps.ps3000aGetTimebase2(
+        chandle, TIMEBASE, n_samples, ctypes.byref(timeIntervalNs), 
+        1, ctypes.byref(returnedMaxSamples), 0
+    )
+    assert_pico_ok(status)
+    
+    print(f"Timebase {TIMEBASE} gives {timeIntervalNs.value} ns interval")
+    
+    # Calculate required samples to cover 1ms
+    time_required_ns = 1_000_000  # 1ms in nanoseconds
+    samples_needed = int(time_required_ns / timeIntervalNs.value) + 100  # Add margin
+    
+    if samples_needed > n_samples:
+        print(f"WARNING: Need {samples_needed} samples to cover 1ms, but only using {n_samples}")
+    else:
+        print(f"Using {n_samples} samples to cover 1ms (need {samples_needed})")
+
     # Allocate and register buffers
     bufs_a, bufs_b = allocate_buffers(NUM_SEGMENTS, n_samples)
     set_data_buffers(chandle, bufs_a, bufs_b, n_samples)
@@ -174,11 +197,14 @@ def capture_and_save():
         fname = f"seg{idx+1:02d}_{timestamp}.csv"
         path = os.path.join(CSV_DIR, fname)
 
+        # Create time array in nanoseconds, ensure it covers 0 to 1ms exactly
+        time_ns = np.linspace(0, 1_000_000, n_samples)  # Exactly 0 to 1ms
+
         with open(path, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['Index', 'A (mV)', 'B (mV)'])
+            writer.writerow(['Time_ns', 'A_mV', 'B_mV'])
             for i in range(n_samples):
-                writer.writerow([i, data_a[i], data_b[i]])
+                writer.writerow([time_ns[i], data_a[i], data_b[i]])
 
         print(f"Saved segment {idx+1} to {path}")
 
